@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Antenna -->
+    <path
+        android:fillColor="#64748B"
+        android:pathData="M37,24 h4 v14 h-4 z" />
+    <path
+        android:fillColor="#94A3B8"
+        android:pathData="M36,22 h6 v3 h-6 z" />
+
+    <!-- Channel Knob -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M49,32 h6 v6 h-6 z" />
+
+    <!-- Walkie-Talkie Main Rugged Body -->
+    <path
+        android:fillColor="#334155"
+        android:pathData="M32,38 h28 c2.2,0 4,1.8 4,4 v40 c0,2.2 -1.8,4 -4,4 h-28 c-2.2,0 -4,-1.8 -4,-4 v-40 c0,-2.2 1.8,-4 4,-4 z" />
+
+    <!-- Side PTT Button (Vibrant Orange) -->
+    <path
+        android:fillColor="#F97316"
+        android:pathData="M26,46 h2 v14 h-2 c-1.1,0 -2,-0.9 -2,-2 v-10 c0,-1.1 0.9,-2 2,-2 z" />
+
+    <!-- Screen / Display Panel -->
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M33,44 h26 c1.1,0 2,0.9 2,2 v14 c0,1.1 -0.9,2 -2,2 h-26 c-1.1,0 -2,-0.9 -2,-2 v-14 c0,-1.1 0.9,-2 2,-2 z" />
+
+    <!-- Display Content: Channel & Signal Indicator -->
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M36,48 h5 v1.5 h-5 z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M36,51 h12 v2 h-12 z" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M52,48 h4 v4 h-4 z" />
+
+    <!-- Speaker Grille Slits -->
+    <path
+        android:fillColor="#64748B"
+        android:pathData="M35,66 h22 v1.8 h-22 z" />
+    <path
+        android:fillColor="#64748B"
+        android:pathData="M37,70 h18 v1.8 h-18 z" />
+    <path
+        android:fillColor="#64748B"
+        android:pathData="M39,74 h14 v1.8 h-14 z" />
+
+    <!-- Mic / LED Dot -->
+    <path
+        android:fillColor="#EF4444"
+        android:pathData="M57,40 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+
+    <!-- Broadcast Waves (Right side) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M69,47 C72,50 72,56 69,59" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M74,42 C79,48 79,62 74,68" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#60A5FA"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M79,37 C86,45 86,65 79,73" />
+</vector>

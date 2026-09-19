@@ -1,0 +1,6 @@
+{
+  "name": "Wi-Fi Walkie-Talkie",
+  "description": "Push-to-talk Wi-Fi voice broadcast application for real-time walkie-talkie communication across devices on the same local network.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
