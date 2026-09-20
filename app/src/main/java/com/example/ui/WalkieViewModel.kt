@@ -24,6 +24,7 @@ import com.example.model.WifiConnectionState
 import com.example.model.WifiHotspotState
 import com.example.network.NetworkManager
 import com.example.network.WifiHotspotManager
+import com.example.notification.WalkieNotificationManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -94,6 +95,8 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
             networkManager.reconnectSocket()
         }
     )
+
+    private val notificationManager = WalkieNotificationManager(application)
 
     val detectedAudioDevices: StateFlow<List<AudioOutputDevice>> = audioOutputManager.detectedDevices
     val selectedAudioDevice: StateFlow<AudioOutputDevice?> = audioOutputManager.selectedDevice
@@ -200,9 +203,26 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
         // Collect incoming chat messages
         viewModelScope.launch {
             networkManager.incomingMessages.collect { message ->
-                _chatMessages.value = _chatMessages.value + message
-                _unreadMessageCount.value += 1
-                vibrate(100)
+                try {
+                    val currentList = _chatMessages.value
+                    if (currentList.none { it.id == message.id }) {
+                        _chatMessages.value = currentList + message
+                        if (!message.isFromMe) {
+                            _unreadMessageCount.value += 1
+                            vibrate(100)
+                            notificationManager.showChatNotification(
+                                messageId = message.id,
+                                senderName = message.senderName.ifBlank { message.senderCallSign },
+                                senderCallSign = message.senderCallSign,
+                                text = message.text,
+                                channelId = message.channelId,
+                                isDirect = message.recipientId != null
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("WalkieViewModel", "Error processing incoming chat message", e)
+                }
             }
         }
     }
@@ -258,6 +278,7 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
         networkManager.broadcastPttEnd()
 
         vibrate(30)
+        audioPlayerManager.flush()
 
         if (_isRogerBeepEnabled.value) {
             audioPlayerManager.playRogerBeep()
@@ -373,6 +394,13 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
     // Wi-Fi 2.4 GHz Hotspot & Auto-connect Controls
     fun hasHotspotPermission(): Boolean = wifiHotspotManager.hasHotspotPermission()
 
+    val currentDynamicSsid: String
+        get() = wifiHotspotManager.currentDynamicSsid
+
+    fun regenerateDynamicSsid(): String {
+        return wifiHotspotManager.generateDynamicOpenSsid()
+    }
+
     fun create24GhzHotspot() {
         wifiHotspotManager.create24GhzHotspot()
     }
@@ -383,6 +411,10 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
 
     fun connectToWalkieNetwork(network: DiscoveredWifiNetwork) {
         wifiHotspotManager.connectToWalkieNetwork(network.ssid)
+    }
+
+    fun connectToWalkieSsid(ssid: String) {
+        wifiHotspotManager.connectToWalkieNetwork(ssid)
     }
 
     fun disconnectWalkieNetwork() {
@@ -476,11 +508,17 @@ class WalkieViewModel(application: Application) : AndroidViewModel(application) 
 
     fun markMessagesAsRead() {
         _unreadMessageCount.value = 0
+        try {
+            notificationManager.clearChatNotifications()
+        } catch (_: Exception) {}
     }
 
     fun clearChatMessages() {
         _chatMessages.value = emptyList()
         _unreadMessageCount.value = 0
+        try {
+            notificationManager.clearChatNotifications()
+        } catch (_: Exception) {}
     }
 
     private fun vibrate(durationMs: Long) {

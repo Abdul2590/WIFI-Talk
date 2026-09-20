@@ -6,19 +6,28 @@ import java.nio.ByteOrder
 sealed class WalkiePacket {
     abstract val senderId: String
     abstract val channelId: Int
+    open val hopCount: Int = 0
+    open val ttl: Int = 6
+    open val relayNodeId: String = ""
 
     data class PttStart(
         override val senderId: String,
         val callSign: String,
         override val channelId: Int,
-        val timestamp: Long = System.currentTimeMillis()
+        val timestamp: Long = System.currentTimeMillis(),
+        override val hopCount: Int = 0,
+        override val ttl: Int = 6,
+        override val relayNodeId: String = ""
     ) : WalkiePacket()
 
     data class AudioData(
         override val senderId: String,
         override val channelId: Int,
         val sequenceNumber: Int,
-        val pcmData: ByteArray
+        val pcmData: ByteArray,
+        override val hopCount: Int = 0,
+        override val ttl: Int = 6,
+        override val relayNodeId: String = ""
     ) : WalkiePacket() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -28,6 +37,7 @@ sealed class WalkiePacket {
             if (channelId != other.channelId) return false
             if (sequenceNumber != other.sequenceNumber) return false
             if (!pcmData.contentEquals(other.pcmData)) return false
+            if (hopCount != other.hopCount) return false
             return true
         }
 
@@ -42,7 +52,10 @@ sealed class WalkiePacket {
 
     data class PttEnd(
         override val senderId: String,
-        override val channelId: Int
+        override val channelId: Int,
+        override val hopCount: Int = 0,
+        override val ttl: Int = 6,
+        override val relayNodeId: String = ""
     ) : WalkiePacket()
 
     data class Heartbeat(
@@ -52,7 +65,11 @@ sealed class WalkiePacket {
         val isTransmitting: Boolean,
         val userName: String = "",
         val mobileNumber: String = "",
-        val isMessagingEnabled: Boolean = false
+        val isMessagingEnabled: Boolean = false,
+        val timestamp: Long = System.currentTimeMillis(),
+        override val hopCount: Int = 0,
+        override val ttl: Int = 6,
+        override val relayNodeId: String = ""
     ) : WalkiePacket()
 
     data class TextMessage(
@@ -64,11 +81,16 @@ sealed class WalkiePacket {
         override val channelId: Int,
         val text: String,
         val timestamp: Long = System.currentTimeMillis(),
-        val recipientId: String? = null // null means broadcast to channel
+        val recipientId: String? = null, // null means broadcast to channel/mesh
+        override val hopCount: Int = 0,
+        override val ttl: Int = 6,
+        override val relayNodeId: String = ""
     ) : WalkiePacket()
 
     companion object {
-        private val MAGIC = byteArrayOf('W'.code.toByte(), 'T'.code.toByte(), 'K'.code.toByte(), '1'.code.toByte())
+        private val MAGIC_V1 = byteArrayOf('W'.code.toByte(), 'T'.code.toByte(), 'K'.code.toByte(), '1'.code.toByte())
+        private val MAGIC_V2 = byteArrayOf('W'.code.toByte(), 'T'.code.toByte(), 'K'.code.toByte(), '2'.code.toByte())
+
         const val TYPE_PTT_START: Byte = 0x01
         const val TYPE_AUDIO_DATA: Byte = 0x02
         const val TYPE_PTT_END: Byte = 0x03
@@ -78,14 +100,26 @@ sealed class WalkiePacket {
 
         fun serialize(packet: WalkiePacket): ByteArray {
             val senderBytes = packet.senderId.toByteArray(Charsets.UTF_8).take(32).toByteArray()
+            val relayNodeBytes = packet.relayNodeId.toByteArray(Charsets.UTF_8).take(32).toByteArray()
+
+            // Header V2: MAGIC(4) + ttl(1) + hopCount(1) + relayLen(1) + relayBytes(N) + TYPE(1)
+            val headerSize = 4 + 1 + 1 + 1 + relayNodeBytes.size + 1
+
+            fun ByteBuffer.putMeshHeader(type: Byte) {
+                put(MAGIC_V2)
+                put(packet.ttl.coerceIn(0, 255).toByte())
+                put(packet.hopCount.coerceIn(0, 255).toByte())
+                put(relayNodeBytes.size.toByte())
+                put(relayNodeBytes)
+                put(type)
+            }
 
             return when (packet) {
                 is PttStart -> {
                     val callSignBytes = packet.callSign.toByteArray(Charsets.UTF_8).take(32).toByteArray()
-                    val totalSize = 4 + 1 + 1 + senderBytes.size + 1 + callSignBytes.size + 1 + 8
+                    val totalSize = headerSize + 1 + senderBytes.size + 1 + callSignBytes.size + 1 + 8
                     val buffer = ByteBuffer.allocate(totalSize).order(ByteOrder.BIG_ENDIAN)
-                    buffer.put(MAGIC)
-                    buffer.put(TYPE_PTT_START)
+                    buffer.putMeshHeader(TYPE_PTT_START)
                     buffer.put(senderBytes.size.toByte())
                     buffer.put(senderBytes)
                     buffer.put(callSignBytes.size.toByte())
@@ -96,10 +130,9 @@ sealed class WalkiePacket {
                 }
 
                 is AudioData -> {
-                    val totalSize = 4 + 1 + 1 + senderBytes.size + 1 + 4 + 2 + packet.pcmData.size
+                    val totalSize = headerSize + 1 + senderBytes.size + 1 + 4 + 2 + packet.pcmData.size
                     val buffer = ByteBuffer.allocate(totalSize).order(ByteOrder.BIG_ENDIAN)
-                    buffer.put(MAGIC)
-                    buffer.put(TYPE_AUDIO_DATA)
+                    buffer.putMeshHeader(TYPE_AUDIO_DATA)
                     buffer.put(senderBytes.size.toByte())
                     buffer.put(senderBytes)
                     buffer.put(packet.channelId.toByte())
@@ -110,10 +143,9 @@ sealed class WalkiePacket {
                 }
 
                 is PttEnd -> {
-                    val totalSize = 4 + 1 + 1 + senderBytes.size + 1
+                    val totalSize = headerSize + 1 + senderBytes.size + 1
                     val buffer = ByteBuffer.allocate(totalSize).order(ByteOrder.BIG_ENDIAN)
-                    buffer.put(MAGIC)
-                    buffer.put(TYPE_PTT_END)
+                    buffer.putMeshHeader(TYPE_PTT_END)
                     buffer.put(senderBytes.size.toByte())
                     buffer.put(senderBytes)
                     buffer.put(packet.channelId.toByte())
@@ -125,11 +157,10 @@ sealed class WalkiePacket {
                     val userNameBytes = packet.userName.toByteArray(Charsets.UTF_8).take(48).toByteArray()
                     val mobileBytes = packet.mobileNumber.toByteArray(Charsets.UTF_8).take(24).toByteArray()
 
-                    val totalSize = 4 + 1 + 1 + senderBytes.size + 1 + callSignBytes.size + 1 + 1 +
-                            1 + userNameBytes.size + 1 + mobileBytes.size + 1
+                    val totalSize = headerSize + 1 + senderBytes.size + 1 + callSignBytes.size + 1 + 1 +
+                            1 + userNameBytes.size + 1 + mobileBytes.size + 1 + 8
                     val buffer = ByteBuffer.allocate(totalSize).order(ByteOrder.BIG_ENDIAN)
-                    buffer.put(MAGIC)
-                    buffer.put(TYPE_HEARTBEAT_PROFILE)
+                    buffer.putMeshHeader(TYPE_HEARTBEAT_PROFILE)
                     buffer.put(senderBytes.size.toByte())
                     buffer.put(senderBytes)
                     buffer.put(callSignBytes.size.toByte())
@@ -141,6 +172,7 @@ sealed class WalkiePacket {
                     buffer.put(mobileBytes.size.toByte())
                     buffer.put(mobileBytes)
                     buffer.put(if (packet.isMessagingEnabled) 1.toByte() else 0.toByte())
+                    buffer.putLong(packet.timestamp)
                     buffer.array()
                 }
 
@@ -153,7 +185,7 @@ sealed class WalkiePacket {
                     val recipientStr = packet.recipientId ?: ""
                     val recipBytes = recipientStr.toByteArray(Charsets.UTF_8).take(32).toByteArray()
 
-                    val totalSize = 4 + 1 +
+                    val totalSize = headerSize +
                             1 + msgIdBytes.size +
                             1 + senderBytes.size +
                             1 + nameBytes.size +
@@ -165,8 +197,7 @@ sealed class WalkiePacket {
                             2 + textBytes.size
 
                     val buffer = ByteBuffer.allocate(totalSize).order(ByteOrder.BIG_ENDIAN)
-                    buffer.put(MAGIC)
-                    buffer.put(TYPE_TEXT_MESSAGE)
+                    buffer.putMeshHeader(TYPE_TEXT_MESSAGE)
                     buffer.put(msgIdBytes.size.toByte())
                     buffer.put(msgIdBytes)
                     buffer.put(senderBytes.size.toByte())
@@ -192,17 +223,43 @@ sealed class WalkiePacket {
             if (length < 6) return null
             val buffer = ByteBuffer.wrap(bytes, 0, length).order(ByteOrder.BIG_ENDIAN)
 
-            // Check magic
+            // Check magic 'W', 'T', 'K'
             val m0 = buffer.get()
             val m1 = buffer.get()
             val m2 = buffer.get()
             val m3 = buffer.get()
-            if (m0 != MAGIC[0] || m1 != MAGIC[1] || m2 != MAGIC[2] || m3 != MAGIC[3]) {
+
+            if (m0 != 'W'.code.toByte() || m1 != 'T'.code.toByte() || m2 != 'K'.code.toByte()) {
                 return null
             }
 
+            val (ttl, hopCount, relayNodeId, packetType) = when (m3) {
+                '2'.code.toByte() -> {
+                    if (buffer.remaining() < 4) return null
+                    val t = buffer.get().toInt() and 0xFF
+                    val h = buffer.get().toInt() and 0xFF
+                    val rLen = buffer.get().toInt() and 0xFF
+                    if (buffer.remaining() < rLen + 1) return null
+                    val rBytes = ByteArray(rLen)
+                    buffer.get(rBytes)
+                    val rId = String(rBytes, Charsets.UTF_8)
+                    val pType = buffer.get()
+                    listOf(t, h, rId, pType)
+                }
+                '1'.code.toByte() -> {
+                    val pType = buffer.get()
+                    listOf(6, 0, "", pType)
+                }
+                else -> return null
+            }
+
+            val parsedTtl = ttl as Int
+            val parsedHopCount = hopCount as Int
+            val parsedRelayNodeId = relayNodeId as String
+            val parsedType = packetType as Byte
+
             return try {
-                when (buffer.get()) {
+                when (parsedType) {
                     TYPE_PTT_START -> {
                         val senderLen = buffer.get().toInt() and 0xFF
                         if (buffer.remaining() < senderLen) return null
@@ -218,7 +275,15 @@ sealed class WalkiePacket {
 
                         val channelId = buffer.get().toInt() and 0xFF
                         val timestamp = buffer.getLong()
-                        PttStart(senderId, callSign, channelId, timestamp)
+                        PttStart(
+                            senderId = senderId,
+                            callSign = callSign,
+                            channelId = channelId,
+                            timestamp = timestamp,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
+                        )
                     }
 
                     TYPE_AUDIO_DATA -> {
@@ -235,7 +300,15 @@ sealed class WalkiePacket {
                         val pcmData = ByteArray(pcmLen)
                         buffer.get(pcmData)
 
-                        AudioData(senderId, channelId, seq, pcmData)
+                        AudioData(
+                            senderId = senderId,
+                            channelId = channelId,
+                            sequenceNumber = seq,
+                            pcmData = pcmData,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
+                        )
                     }
 
                     TYPE_PTT_END -> {
@@ -246,7 +319,13 @@ sealed class WalkiePacket {
                         val senderId = String(senderBytes, Charsets.UTF_8)
 
                         val channelId = buffer.get().toInt() and 0xFF
-                        PttEnd(senderId, channelId)
+                        PttEnd(
+                            senderId = senderId,
+                            channelId = channelId,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
+                        )
                     }
 
                     TYPE_HEARTBEAT -> {
@@ -264,7 +343,15 @@ sealed class WalkiePacket {
 
                         val channelId = buffer.get().toInt() and 0xFF
                         val isTransmitting = buffer.get().toInt() == 1
-                        Heartbeat(senderId, callSign, channelId, isTransmitting)
+                        Heartbeat(
+                            senderId = senderId,
+                            callSign = callSign,
+                            channelId = channelId,
+                            isTransmitting = isTransmitting,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
+                        )
                     }
 
                     TYPE_HEARTBEAT_PROFILE -> {
@@ -297,6 +384,8 @@ sealed class WalkiePacket {
 
                         val isMessagingEnabled = buffer.get().toInt() == 1
 
+                        val timestamp = if (buffer.remaining() >= 8) buffer.getLong() else System.currentTimeMillis()
+
                         Heartbeat(
                             senderId = senderId,
                             callSign = callSign,
@@ -304,7 +393,11 @@ sealed class WalkiePacket {
                             isTransmitting = isTransmitting,
                             userName = userName,
                             mobileNumber = mobileNumber,
-                            isMessagingEnabled = isMessagingEnabled
+                            isMessagingEnabled = isMessagingEnabled,
+                            timestamp = timestamp,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
                         )
                     }
 
@@ -367,7 +460,10 @@ sealed class WalkiePacket {
                             channelId = channelId,
                             text = text,
                             timestamp = timestamp,
-                            recipientId = recipientId
+                            recipientId = recipientId,
+                            hopCount = parsedHopCount,
+                            ttl = parsedTtl,
+                            relayNodeId = parsedRelayNodeId
                         )
                     }
 

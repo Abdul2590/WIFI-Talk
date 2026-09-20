@@ -83,6 +83,8 @@ fun WifiMeshDialog(
     autoWifiState: AutoWifiState,
     discoveredNetworks: List<DiscoveredWifiNetwork>,
     hasHotspotPermission: Boolean = true,
+    currentDynamicSsid: String = "",
+    onRegenerateDynamicSsid: () -> Unit = {},
     onRequestPermission: () -> Unit = {},
     onCreateHotspot: () -> Unit,
     onStopHotspot: () -> Unit,
@@ -291,55 +293,31 @@ fun WifiMeshDialog(
 
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Surface(
-                                                shape = RoundedCornerShape(4.dp),
-                                                color = if (hotspotState.password.isEmpty()) SignalGreen.copy(alpha = 0.2f) else RadioCyan.copy(alpha = 0.2f)
-                                            ) {
-                                                Text(
-                                                    text = if (hotspotState.password.isEmpty()) "OPEN / NO PASSWORD" else "AUTO-SECURED MESH",
-                                                    color = if (hotspotState.password.isEmpty()) SignalGreen else RadioCyan,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = SignalGreen.copy(alpha = 0.2f)
+                                        ) {
                                             Text(
-                                                text = if (hotspotState.password.isEmpty()) "Direct Peer Mesh" else "Auto-Connect Enabled",
-                                                color = TextSecondary,
-                                                fontSize = 10.sp
+                                                text = "OPEN / NO SECURITY",
+                                                color = SignalGreen,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }
-                                        if (hotspotState.password.isNotEmpty()) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    text = "PWD: ${hotspotState.password}",
-                                                    color = TacticalAmber,
-                                                    fontSize = 10.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                                IconButton(
-                                                    onClick = {
-                                                        copyToClipboard(context, "Password", hotspotState.password)
-                                                    },
-                                                    modifier = Modifier.size(24.dp)
-                                                ) {
-                                                    Icon(
-                                                        Icons.Default.ContentCopy,
-                                                        contentDescription = "Copy Password",
-                                                        tint = TacticalAmber,
-                                                        modifier = Modifier.size(12.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Direct Zero-Config Connect",
+                                            color = TextSecondary,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
                                     }
+
+                                    Spacer(modifier = Modifier.height(4.dp))
 
                                     Text(
                                         text = "BAND: 2.4 GHz | IP: ${hotspotState.ipAddress}",
@@ -375,6 +353,76 @@ fun WifiMeshDialog(
                                 )
                             }
                         } else {
+                            // Dynamic Open SSID Display Card
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp)),
+                                color = TacticalSurfaceVariant.copy(alpha = 0.6f),
+                                border = BorderStroke(1.dp, TacticalSurfaceHighlight)
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "DYNAMIC OPEN SSID",
+                                                color = TextMuted,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                            Text(
+                                                text = currentDynamicSsid.ifEmpty { "Walkie-Open-..." },
+                                                color = RadioCyan,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                        }
+
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            IconButton(
+                                                onClick = onRegenerateDynamicSsid,
+                                                enabled = !hotspotState.isStarting,
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Refresh,
+                                                    contentDescription = "Regenerate SSID",
+                                                    tint = RadioCyan,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = SignalGreen.copy(alpha = 0.2f)
+                                            ) {
+                                                Text(
+                                                    text = "NO SECURITY",
+                                                    color = SignalGreen,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Open network without password so peer devices connect instantly.",
+                                        color = TextMuted,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
                             if (!hasHotspotPermission) {
                                 Surface(
                                     modifier = Modifier
@@ -433,7 +481,7 @@ fun WifiMeshDialog(
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "INITIALIZING 2.4GHz HOTSPOT...",
+                                        text = "INITIALIZING OPEN HOTSPOT...",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         fontFamily = FontFamily.Monospace
@@ -451,7 +499,7 @@ fun WifiMeshDialog(
                                     Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "CREATE 2.4GHz WALKIE HOTSPOT",
+                                        text = "HOST OPEN 2.4GHz HOTSPOT",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         fontFamily = FontFamily.Monospace
@@ -630,10 +678,29 @@ fun WifiMeshDialog(
                                         fontFamily = FontFamily.Monospace
                                     )
                                     Text(
-                                        text = "Start 2.4GHz Hotspot on another phone to connect automatically",
+                                        text = "Start Open Hotspot on another device, then tap Scan below:",
                                         color = TextMuted,
                                         fontSize = 10.sp
                                     )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Button(
+                                        onClick = onScan,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = RadioCyan,
+                                            contentColor = TacticalDarkBg
+                                        ),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier.height(34.dp)
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            "SCAN FOR OPEN PEERS",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
                                 }
                             }
                         } else {
@@ -701,6 +768,21 @@ fun WifiMeshDialog(
                                                             )
                                                         }
                                                     }
+                                                    if (network.isOpen) {
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Surface(
+                                                            shape = RoundedCornerShape(3.dp),
+                                                            color = SignalGreen.copy(alpha = 0.2f)
+                                                        ) {
+                                                            Text(
+                                                                text = "OPEN",
+                                                                color = SignalGreen,
+                                                                fontSize = 8.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                                 Text(
                                                     text = "Signal: ${network.level} dBm | ${network.frequencyMhz} MHz | ${network.securityInfo}",
@@ -735,7 +817,7 @@ fun WifiMeshDialog(
                                                 modifier = Modifier.height(30.dp)
                                             ) {
                                                 Text(
-                                                    "CONNECT",
+                                                    if (network.isOpen) "CONNECT (OPEN)" else "CONNECT",
                                                     fontSize = 9.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     fontFamily = FontFamily.Monospace

@@ -54,11 +54,12 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis(),
     val channelId: Int = 0, // 0 = Direct peer chat or broadcast channel
     val isFromMe: Boolean = false,
-    val recipientId: String? = null // null = broadcast to all peers on channel/mesh
+    val recipientId: String? = null, // null = broadcast to all peers on channel/mesh
+    val hopCount: Int = 0
 )
 
 /**
- * A device detected on the local Wi-Fi network.
+ * A device detected on the local Wi-Fi / Hotspot mesh network.
  */
 data class PeerDevice(
     val id: String,
@@ -69,7 +70,9 @@ data class PeerDevice(
     val lastSeenMs: Long = System.currentTimeMillis(),
     val userName: String = "",
     val mobileNumber: String = "",
-    val isMessagingEnabled: Boolean = false
+    val isMessagingEnabled: Boolean = false,
+    val hopCount: Int = 0,
+    val relayVia: String = ""
 )
 
 /**
@@ -87,7 +90,8 @@ sealed interface TransmissionState {
         val speakerId: String,
         val speakerCallSign: String,
         val channel: WalkieChannel,
-        val startedAtMs: Long = System.currentTimeMillis()
+        val startedAtMs: Long = System.currentTimeMillis(),
+        val hopCount: Int = 0
     ) : TransmissionState
 }
 

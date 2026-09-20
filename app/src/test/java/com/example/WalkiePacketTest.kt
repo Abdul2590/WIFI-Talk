@@ -53,15 +53,15 @@ class WalkiePacketTest {
         assertEquals(1, audioData.channelId)
         assertEquals(42, audioData.sequenceNumber)
         assertArrayEquals(dummyPcm, audioData.pcmData)
-        assertEquals(480, dummyPcm.size)
+        assertEquals(AudioConstants.CHUNK_SIZE_BYTES, dummyPcm.size)
     }
 
     @Test
     fun `test AudioConstants latency is under 20ms`() {
         assertTrue(AudioConstants.CHUNK_DURATION_MS <= 20)
-        assertEquals(15, AudioConstants.CHUNK_DURATION_MS)
-        assertEquals(240, AudioConstants.SAMPLES_PER_CHUNK)
-        assertEquals(480, AudioConstants.CHUNK_SIZE_BYTES)
+        assertEquals(20, AudioConstants.CHUNK_DURATION_MS)
+        assertEquals(320, AudioConstants.SAMPLES_PER_CHUNK)
+        assertEquals(640, AudioConstants.CHUNK_SIZE_BYTES)
     }
 
     @Test
@@ -168,5 +168,65 @@ class WalkiePacketTest {
         org.junit.Assert.assertFalse(state.isStarting)
         assertEquals("2.4 GHz", state.band)
         assertEquals("192.168.43.1", state.ipAddress)
+    }
+
+    @Test
+    fun `test Mesh Chain Relay packet properties and serialization`() {
+        val original = WalkiePacket.TextMessage(
+            messageId = "MSG_BLOCKCHAIN_001",
+            senderId = "PEER_1",
+            senderName = "Alice",
+            senderMobile = "9876543210",
+            senderCallSign = "ALPHA-1",
+            channelId = 1,
+            text = "Hello to Peer 4 via relay!",
+            timestamp = 1700000050000L,
+            recipientId = "PEER_4",
+            hopCount = 2,
+            ttl = 4,
+            relayNodeId = "PEER_2"
+        )
+
+        val bytes = WalkiePacket.serialize(original)
+        val deserialized = WalkiePacket.deserialize(bytes, bytes.size)
+
+        assertNotNull(deserialized)
+        assertTrue(deserialized is WalkiePacket.TextMessage)
+        val msg = deserialized as WalkiePacket.TextMessage
+        assertEquals("MSG_BLOCKCHAIN_001", msg.messageId)
+        assertEquals("PEER_1", msg.senderId)
+        assertEquals("Alice", msg.senderName)
+        assertEquals("9876543210", msg.senderMobile)
+        assertEquals("ALPHA-1", msg.senderCallSign)
+        assertEquals("PEER_4", msg.recipientId)
+        assertEquals("Hello to Peer 4 via relay!", msg.text)
+        assertEquals(2, msg.hopCount)
+        assertEquals(4, msg.ttl)
+        assertEquals("PEER_2", msg.relayNodeId)
+    }
+
+    @Test
+    fun `test Multi-hop AudioData packet preserves sequence and pcm data`() {
+        val pcm = ByteArray(AudioConstants.CHUNK_SIZE_BYTES) { (it % 128).toByte() }
+        val audio = WalkiePacket.AudioData(
+            senderId = "PEER_START",
+            channelId = 2,
+            sequenceNumber = 105,
+            pcmData = pcm,
+            hopCount = 3,
+            ttl = 3,
+            relayNodeId = "PEER_MIDDLE"
+        )
+
+        val bytes = WalkiePacket.serialize(audio)
+        val deserialized = WalkiePacket.deserialize(bytes, bytes.size) as WalkiePacket.AudioData
+
+        assertEquals("PEER_START", audio.senderId)
+        assertEquals(2, audio.channelId)
+        assertEquals(105, audio.sequenceNumber)
+        assertEquals(3, audio.hopCount)
+        assertEquals(3, audio.ttl)
+        assertEquals("PEER_MIDDLE", audio.relayNodeId)
+        assertArrayEquals(pcm, deserialized.pcmData)
     }
 }

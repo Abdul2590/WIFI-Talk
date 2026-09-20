@@ -72,17 +72,17 @@ class AudioProcessor(
             // Very slow upward creep so speech bursts don't inflate the noise estimate
             noiseFloorRms = noiseFloorRms * 0.999 + currentRms * 0.001
         }
-        val dynamicNoiseThreshold = max(180.0, noiseFloorRms * 1.8)
+        val dynamicNoiseThreshold = max(55.0, noiseFloorRms * 1.25)
 
-        // Target gain based on whether current chunk is speech vs noise
+        // Target gain based on whether current chunk is speech vs background noise
         val targetGain = if (isNoiseCancellationEnabled) {
             if (currentRms < dynamicNoiseThreshold) {
-                // Background noise below speech threshold: aggressively attenuate (-24dB to -30dB)
-                0.04
-            } else if (currentRms < dynamicNoiseThreshold * 2.2) {
+                // Background noise below speech threshold: attenuate moderately without cutting speech tails
+                0.22
+            } else if (currentRms < dynamicNoiseThreshold * 1.8) {
                 // Knee transition region: smooth linear ramp to avoid abrupt gating chatter
-                val ratio = (currentRms - dynamicNoiseThreshold) / (dynamicNoiseThreshold * 1.2)
-                0.04 + 0.96 * ratio.coerceIn(0.0, 1.0)
+                val ratio = (currentRms - dynamicNoiseThreshold) / (dynamicNoiseThreshold * 0.8)
+                0.22 + 0.78 * ratio.coerceIn(0.0, 1.0)
             } else {
                 // Active clear speech
                 1.0
@@ -91,8 +91,8 @@ class AudioProcessor(
             1.0
         }
 
-        // Smooth gain envelope (attack 5ms, release 40ms)
-        val gainSmoothing = if (targetGain > currentGainEnvelope) 0.35 else 0.08
+        // Smooth gain envelope (fast attack 0.65 for instant voice onset, smooth release 0.05 to avoid word clipping)
+        val gainSmoothing = if (targetGain > currentGainEnvelope) 0.65 else 0.05
         currentGainEnvelope += (targetGain - currentGainEnvelope) * gainSmoothing
 
         val output = ByteArray(pcmInput.size)

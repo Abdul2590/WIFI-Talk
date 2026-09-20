@@ -81,6 +81,7 @@ import androidx.core.content.ContextCompat
 import com.example.model.AudioOutputType
 import com.example.model.PttMode
 import com.example.model.TransmissionState
+import com.example.notification.WalkieNotificationManager
 import com.example.ui.components.AudioOutputDialog
 import com.example.ui.components.AudioVisualizer
 import com.example.ui.components.ChannelSelector
@@ -149,12 +150,13 @@ fun WalkieScreen(
     var showChatDialog by rememberSaveable { mutableStateOf(false) }
     var showProfileSetupDialog by rememberSaveable { mutableStateOf(false) }
 
-    // Multi-permission launcher (mic, nearby wifi, location, bluetooth)
+    // Multi-permission launcher (mic, nearby wifi, location, bluetooth, notifications)
     val permissionsToRequest = buildList {
         add(Manifest.permission.RECORD_AUDIO)
         add(Manifest.permission.ACCESS_FINE_LOCATION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             add(Manifest.permission.BLUETOOTH_CONNECT)
@@ -183,7 +185,13 @@ fun WalkieScreen(
         }
     }
 
+    val activity = context as? androidx.activity.ComponentActivity
     LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra(WalkieNotificationManager.EXTRA_OPEN_CHAT, false) == true) {
+            showChatDialog = true
+            viewModel.markMessagesAsRead()
+        }
+
         val micGranted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
@@ -667,6 +675,8 @@ fun WalkieScreen(
                 autoWifiState = autoWifiState,
                 discoveredNetworks = discoveredWalkieNetworks,
                 hasHotspotPermission = viewModel.hasHotspotPermission(),
+                currentDynamicSsid = viewModel.currentDynamicSsid,
+                onRegenerateDynamicSsid = { viewModel.regenerateDynamicSsid() },
                 onRequestPermission = { permissionLauncher.launch(permissionsToRequest) },
                 onCreateHotspot = {
                     if (!viewModel.hasHotspotPermission()) {
@@ -721,6 +731,9 @@ fun WalkieScreen(
         }
 
         if (showChatDialog) {
+            LaunchedEffect(Unit) {
+                viewModel.markMessagesAsRead()
+            }
             ChatDialog(
                 userProfile = userProfile,
                 messages = chatMessages,
@@ -735,7 +748,10 @@ fun WalkieScreen(
                 onClearChat = {
                     viewModel.clearChatMessages()
                 },
-                onDismiss = { showChatDialog = false }
+                onDismiss = {
+                    viewModel.markMessagesAsRead()
+                    showChatDialog = false
+                }
             )
         }
 

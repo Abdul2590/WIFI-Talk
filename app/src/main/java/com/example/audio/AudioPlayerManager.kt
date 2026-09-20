@@ -12,7 +12,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -37,9 +40,12 @@ class AudioPlayerManager(
     var volumeGain: Float = 2.2f
 
     private var amplitudeDecayJob: Job? = null
+    private var playbackJob: Job? = null
+    private val audioQueue = LinkedBlockingQueue<ByteArray>(32)
 
     init {
         initAudioTrack()
+        startPlaybackWorker()
     }
 
     @Synchronized
@@ -50,8 +56,8 @@ class AudioPlayerManager(
                 AudioConstants.CHANNEL_OUT_CONFIG,
                 AudioConstants.AUDIO_FORMAT
             )
-            // Use minimal buffer size to avoid playback queue latency (< 20ms)
-            val bufferSize = max(minBufferSize, AudioConstants.CHUNK_SIZE_BYTES * 2)
+            // Generous internal buffer (~160ms) ensures hardware never starves between Wi-Fi packets
+            val bufferSize = max(minBufferSize * 2, AudioConstants.CHUNK_SIZE_BYTES * 8)
 
             val audioAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -82,7 +88,6 @@ class AudioPlayerManager(
                 )
             }
 
-            // Set track volume to max
             track.setVolume(1.0f)
             track.play()
             audioTrack = track
@@ -93,14 +98,45 @@ class AudioPlayerManager(
         }
     }
 
+    private fun startPlaybackWorker() {
+        playbackJob?.cancel()
+        playbackJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    val chunk = audioQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
+                    val track = audioTrack ?: continue
+                    if (track.state != AudioTrack.STATE_INITIALIZED) continue
+
+                    if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                        try {
+                            track.play()
+                        } catch (_: Exception) {}
+                    }
+
+                    var offset = 0
+                    while (offset < chunk.size && isActive) {
+                        val written = track.write(chunk, offset, chunk.size - offset, AudioTrack.WRITE_BLOCKING)
+                        if (written > 0) {
+                            offset += written
+                        } else {
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        Log.d(tag, "Playback worker retry: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
     fun playChunk(pcmData: ByteArray) {
         if (_isMuted.value) return
 
         if (audioTrack == null || audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
             initAudioTrack()
         }
-
-        val track = audioTrack ?: return
 
         try {
             // Apply volume boost with soft knee limiter to prevent harsh clipping distortion
@@ -117,28 +153,35 @@ class AudioPlayerManager(
             // Decay amplitude after short delay
             amplitudeDecayJob?.cancel()
             amplitudeDecayJob = scope.launch(Dispatchers.Default) {
-                kotlinx.coroutines.delay(60)
+                kotlinx.coroutines.delay(80)
                 _incomingAmplitude.value = 0f
             }
 
-            // WRITE_NON_BLOCKING for minimal delay
-            track.write(processedPcm, 0, processedPcm.size, AudioTrack.WRITE_NON_BLOCKING)
+            // Bound jitter buffer latency: keep at most 6 chunks (~120ms) to ensure real-time walkie conversation
+            while (audioQueue.size > 6) {
+                audioQueue.poll()
+            }
+            audioQueue.offer(processedPcm)
         } catch (e: Exception) {
-            Log.e(tag, "Error playing audio chunk", e)
+            Log.e(tag, "Error queuing audio chunk", e)
         }
+    }
+
+    fun flush() {
+        audioQueue.clear()
     }
 
     fun playRogerBeep() {
         scope.launch(Dispatchers.IO) {
             val beep = ToneGenerator.createRogerBeep()
-            audioTrack?.write(beep, 0, beep.size)
+            audioQueue.offer(beep)
         }
     }
 
     fun playStartChirp() {
         scope.launch(Dispatchers.IO) {
             val chirp = ToneGenerator.createPttStartChirp()
-            audioTrack?.write(chirp, 0, chirp.size)
+            audioQueue.offer(chirp)
         }
     }
 
@@ -201,6 +244,8 @@ class AudioPlayerManager(
 
     fun release() {
         try {
+            playbackJob?.cancel()
+            audioQueue.clear()
             audioTrack?.stop()
             audioTrack?.release()
             audioTrack = null

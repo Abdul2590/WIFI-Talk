@@ -24,13 +24,18 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.net.DatagramPacket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.MulticastSocket
 import java.net.NetworkInterface
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CopyOnWriteArraySet
 
 class NetworkManager(
     private val context: Context,
@@ -63,6 +68,15 @@ class NetworkManager(
     private val _incomingMessages = MutableSharedFlow<ChatMessage>(extraBufferCapacity = 128)
     val incomingMessages: SharedFlow<ChatMessage> = _incomingMessages.asSharedFlow()
 
+    // Mesh packet deduplication cache: prevents loops, feedback storms, and duplicate audio in multi-hop mesh
+    private val seenMeshPacketKeys = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Long>(512, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
+                return size > 600
+            }
+        }
+    )
+
     private val _remoteTransmissionState = MutableStateFlow<TransmissionState>(TransmissionState.Idle)
     val remoteTransmissionState: StateFlow<TransmissionState> = _remoteTransmissionState.asStateFlow()
 
@@ -76,9 +90,11 @@ class NetworkManager(
     private var heartbeatJob: Job? = null
     private var activeSpeakerTimeoutJob: Job? = null
 
-    private var broadcastInetAddress: InetAddress? = null
+    // Multi-interface tracking for Hotspot + Wi-Fi Mesh Chain
+    private val allActiveInterfaces = CopyOnWriteArrayList<NetworkInterface>()
+    private val allBroadcastAddresses = CopyOnWriteArraySet<InetAddress>()
+    private val allLocalIps = CopyOnWriteArraySet<String>()
     private var multicastInetAddress: InetAddress? = null
-    private var activeNetworkInterface: NetworkInterface? = null
 
     init {
         acquireLocks()
@@ -99,7 +115,7 @@ class NetworkManager(
             val powerManager = context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WalkieTalkie:WakeLock").apply {
                 setReferenceCounted(false)
-                acquire(10 * 60 * 1000L) // 10 min safety timeout
+                acquire(15 * 60 * 1000L) // 15 min safety timeout
             }
 
             _wifiState.value = _wifiState.value.copy(isMulticastLockAcquired = multicastLock?.isHeld == true)
@@ -108,47 +124,63 @@ class NetworkManager(
         }
     }
 
+    /**
+     * Inspects ALL available network interfaces (Wi-Fi wlan0, Mobile Hotspot ap0/softap0, Wi-Fi Direct p2p0, USB rndis).
+     * Collects all local IPs and broadcast destinations for multi-hop mesh routing.
+     */
     fun refreshNetworkInfo() {
         try {
-            var localIp = "127.0.0.1"
-            var broadcastIp = "255.255.255.255"
-            var matchedInterface: NetworkInterface? = null
+            allActiveInterfaces.clear()
+            allBroadcastAddresses.clear()
+            allLocalIps.clear()
+
+            var primaryIp = "127.0.0.1"
+            var primaryBcast = "255.255.255.255"
+            var primaryInterfaceName = "None"
 
             val interfaces = NetworkInterface.getNetworkInterfaces()
-            val candidateInterfaces = mutableListOf<Pair<NetworkInterface, String>>()
-
             while (interfaces.hasMoreElements()) {
                 val intf = interfaces.nextElement()
                 if (intf.isLoopback || !intf.isUp) continue
 
+                var hasIpv4 = false
                 for (addr in intf.interfaceAddresses) {
                     val inetAddr = addr.address
                     if (inetAddr is Inet4Address && !inetAddr.isLoopbackAddress) {
-                        val hostIp = inetAddr.hostAddress ?: ""
-                        candidateInterfaces.add(Pair(intf, hostIp))
+                        hasIpv4 = true
+                        val hostIp = inetAddr.hostAddress ?: continue
+                        allLocalIps.add(hostIp)
 
-                        addr.broadcast?.let {
-                            broadcastIp = it.hostAddress ?: broadcastIp
-                            broadcastInetAddress = it
+                        addr.broadcast?.let { bcast ->
+                            allBroadcastAddresses.add(bcast)
+                        }
+
+                        if (primaryIp == "127.0.0.1") {
+                            primaryIp = hostIp
+                            primaryBcast = addr.broadcast?.hostAddress ?: "255.255.255.255"
+                            primaryInterfaceName = intf.name
                         }
                     }
                 }
+
+                if (hasIpv4) {
+                    allActiveInterfaces.add(intf)
+                }
             }
 
-            // Prioritize Wi-Fi or tethering/hotspot interfaces (wlan, ap, softap) over cellular (rmnet, ccmni)
-            val preferred = candidateInterfaces.firstOrNull { (intf, _) ->
-                val name = intf.name.lowercase()
-                name.startsWith("wlan") || name.startsWith("ap") || name.startsWith("softap") || name.startsWith("rndis")
-            } ?: candidateInterfaces.firstOrNull()
-
-            if (preferred != null) {
-                matchedInterface = preferred.first
-                localIp = preferred.second
-            }
-
-            activeNetworkInterface = matchedInterface
-            if (broadcastInetAddress == null) {
-                broadcastInetAddress = InetAddress.getByName(broadcastIp)
+            // Always add universal and common hotspot/tethering broadcast targets
+            listOf(
+                "255.255.255.255",
+                "192.168.43.255", // Standard Android Mobile Hotspot broadcast
+                "192.168.49.255", // Standard Wi-Fi Direct broadcast
+                "192.168.50.255",
+                "192.168.1.255",
+                "192.168.0.255",
+                "10.0.0.255"
+            ).forEach { ip ->
+                try {
+                    allBroadcastAddresses.add(InetAddress.getByName(ip))
+                } catch (_: Exception) {}
             }
 
             val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -157,14 +189,16 @@ class NetworkManager(
             val isWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
 
             _wifiState.value = WifiConnectionState(
-                isConnected = isWifi || localIp != "127.0.0.1",
-                ssid = if (isWifi) "Wi-Fi Connected" else if (localIp != "127.0.0.1") "Direct Mesh (${matchedInterface?.name ?: "Wi-Fi"})" else "No Wi-Fi",
-                ipAddress = localIp,
-                broadcastAddress = broadcastIp,
+                isConnected = isWifi || allActiveInterfaces.isNotEmpty(),
+                ssid = if (isWifi) "Wi-Fi Connected"
+                       else if (allActiveInterfaces.isNotEmpty()) "Mesh Relay (${allActiveInterfaces.joinToString { it.name }})"
+                       else "No Wi-Fi",
+                ipAddress = primaryIp,
+                broadcastAddress = primaryBcast,
                 isMulticastLockAcquired = multicastLock?.isHeld == true
             )
         } catch (e: Exception) {
-            Log.e(tag, "Error inspecting network interface", e)
+            Log.e(tag, "Error inspecting network interfaces", e)
         }
     }
 
@@ -182,7 +216,7 @@ class NetworkManager(
 
             val socket = MulticastSocket(AudioConstants.DEFAULT_PORT).apply {
                 reuseAddress = true
-                timeToLive = 4 // Subnet scope
+                timeToLive = 8 // Scope across multi-hop subnet boundaries
                 broadcast = true
             }
 
@@ -201,10 +235,7 @@ class NetworkManager(
         currentChannel = channel
         joinMulticastGroup(channel)
 
-        // Reset any current incoming transmission
         _remoteTransmissionState.value = TransmissionState.Idle
-
-        // Send immediate presence announcement on new channel
         sendHeartbeat()
     }
 
@@ -214,13 +245,21 @@ class NetworkManager(
             val group = InetAddress.getByName(channel.multicastGroup)
             multicastInetAddress = group
 
-            if (activeNetworkInterface != null) {
-                socket.joinGroup(InetSocketAddress(group, AudioConstants.DEFAULT_PORT), activeNetworkInterface)
-            } else {
+            // Join the multicast group on EVERY active network interface (Wi-Fi + Hotspot + Tethering)
+            for (intf in allActiveInterfaces) {
+                try {
+                    socket.joinGroup(InetSocketAddress(group, AudioConstants.DEFAULT_PORT), intf)
+                    Log.d(tag, "Joined multicast group ${channel.multicastGroup} on interface ${intf.name}")
+                } catch (e: Exception) {
+                    Log.d(tag, "Interface ${intf.name} multicast join skipped: ${e.message}")
+                }
+            }
+
+            // Fallback wildcard join
+            try {
                 @Suppress("DEPRECATION")
                 socket.joinGroup(group)
-            }
-            Log.d(tag, "Joined multicast group: ${channel.multicastGroup} on port ${AudioConstants.DEFAULT_PORT}")
+            } catch (_: Exception) {}
         } catch (e: Exception) {
             Log.e(tag, "Failed to join multicast group ${channel.multicastGroup}", e)
         }
@@ -230,21 +269,34 @@ class NetworkManager(
         val socket = multicastSocket ?: return
         try {
             val group = InetAddress.getByName(channel.multicastGroup)
-            if (activeNetworkInterface != null) {
-                socket.leaveGroup(InetSocketAddress(group, AudioConstants.DEFAULT_PORT), activeNetworkInterface)
-            } else {
+            for (intf in allActiveInterfaces) {
+                try {
+                    socket.leaveGroup(InetSocketAddress(group, AudioConstants.DEFAULT_PORT), intf)
+                } catch (_: Exception) {}
+            }
+            try {
                 @Suppress("DEPRECATION")
                 socket.leaveGroup(group)
-            }
+            } catch (_: Exception) {}
         } catch (e: Exception) {
             Log.e(tag, "Failed to leave multicast group ${channel.multicastGroup}", e)
+        }
+    }
+
+    private fun getPacketUniqueKey(packet: WalkiePacket): String {
+        return when (packet) {
+            is WalkiePacket.AudioData -> "${packet.senderId}_audio_${packet.sequenceNumber}"
+            is WalkiePacket.TextMessage -> packet.messageId
+            is WalkiePacket.PttStart -> "${packet.senderId}_start_${packet.timestamp}"
+            is WalkiePacket.PttEnd -> "${packet.senderId}_end_${packet.channelId}"
+            is WalkiePacket.Heartbeat -> "${packet.senderId}_hb_${packet.timestamp / 2000}"
         }
     }
 
     private fun startReceiver() {
         receiverJob?.cancel()
         receiverJob = scope.launch(Dispatchers.IO) {
-            val receiveBuffer = ByteArray(2048)
+            val receiveBuffer = ByteArray(4096)
 
             while (isActive) {
                 try {
@@ -253,12 +305,12 @@ class NetworkManager(
                         return@launch
                     }
 
-                    val packet = DatagramPacket(receiveBuffer, receiveBuffer.size)
-                    socket.receive(packet)
+                    val datagram = DatagramPacket(receiveBuffer, receiveBuffer.size)
+                    socket.receive(datagram)
 
-                    val receivedBytes = packet.data
-                    val length = packet.length
-                    val senderIp = packet.address.hostAddress ?: ""
+                    val receivedBytes = datagram.data
+                    val length = datagram.length
+                    val senderIp = datagram.address.hostAddress ?: ""
 
                     val walkiePacket = WalkiePacket.deserialize(receivedBytes, length) ?: continue
 
@@ -267,7 +319,58 @@ class NetworkManager(
                         continue
                     }
 
+                    // Ignore if this node was the immediate relayer
+                    if (walkiePacket.relayNodeId == myDeviceId) {
+                        continue
+                    }
+
+                    // Mesh deduplication: if already processed within last 8 seconds, drop to break loops
+                    val packetKey = getPacketUniqueKey(walkiePacket)
+                    val now = System.currentTimeMillis()
+                    val lastSeen = seenMeshPacketKeys[packetKey]
+                    if (lastSeen != null && (now - lastSeen) < 8000) {
+                        continue
+                    }
+                    seenMeshPacketKeys[packetKey] = now
+
+                    // Handle locally
                     handleIncomingPacket(walkiePacket, senderIp)
+
+                    // Blockchain-style Multi-Hop Mesh Relay:
+                    // If packet has TTL > 1, decrement TTL, increment hopCount, and re-broadcast to other interfaces and peers
+                    if (walkiePacket.ttl > 1 && walkiePacket.senderId != myDeviceId) {
+                        val forwardedPacket = when (walkiePacket) {
+                            is WalkiePacket.PttStart -> walkiePacket.copy(
+                                hopCount = walkiePacket.hopCount + 1,
+                                ttl = walkiePacket.ttl - 1,
+                                relayNodeId = myDeviceId
+                            )
+                            is WalkiePacket.AudioData -> walkiePacket.copy(
+                                hopCount = walkiePacket.hopCount + 1,
+                                ttl = walkiePacket.ttl - 1,
+                                relayNodeId = myDeviceId
+                            )
+                            is WalkiePacket.PttEnd -> walkiePacket.copy(
+                                hopCount = walkiePacket.hopCount + 1,
+                                ttl = walkiePacket.ttl - 1,
+                                relayNodeId = myDeviceId
+                            )
+                            is WalkiePacket.Heartbeat -> walkiePacket.copy(
+                                hopCount = walkiePacket.hopCount + 1,
+                                ttl = walkiePacket.ttl - 1,
+                                relayNodeId = myDeviceId
+                            )
+                            is WalkiePacket.TextMessage -> walkiePacket.copy(
+                                hopCount = walkiePacket.hopCount + 1,
+                                ttl = walkiePacket.ttl - 1,
+                                relayNodeId = myDeviceId
+                            )
+                        }
+
+                        scope.launch(Dispatchers.IO) {
+                            dispatchPacket(forwardedPacket, excludeIp = senderIp)
+                        }
+                    }
                 } catch (e: Exception) {
                     if (isActive) {
                         delay(200)
@@ -285,11 +388,20 @@ class NetworkManager(
                         speakerId = packet.senderId,
                         speakerCallSign = packet.callSign,
                         channel = currentChannel,
-                        startedAtMs = packet.timestamp
+                        startedAtMs = packet.timestamp,
+                        hopCount = packet.hopCount
                     )
                     resetSpeakerTimeout(packet.senderId)
                 }
-                updatePeer(packet.senderId, packet.callSign, senderIp, packet.channelId, isTransmitting = true)
+                updatePeer(
+                    id = packet.senderId,
+                    callSign = packet.callSign,
+                    ip = senderIp,
+                    channel = packet.channelId,
+                    isTransmitting = true,
+                    hopCount = packet.hopCount,
+                    relayVia = if (packet.hopCount > 0) senderIp else ""
+                )
             }
 
             is WalkiePacket.AudioData -> {
@@ -301,7 +413,8 @@ class NetworkManager(
                         _remoteTransmissionState.value = TransmissionState.Receiving(
                             speakerId = packet.senderId,
                             speakerCallSign = peer?.callSign ?: "Radio ${packet.senderId.take(4)}",
-                            channel = currentChannel
+                            channel = currentChannel,
+                            hopCount = packet.hopCount
                         )
                     }
                     resetSpeakerTimeout(packet.senderId)
@@ -328,12 +441,14 @@ class NetworkManager(
                     isTransmitting = packet.isTransmitting,
                     userName = packet.userName,
                     mobileNumber = packet.mobileNumber,
-                    isMessagingEnabled = packet.isMessagingEnabled
+                    isMessagingEnabled = packet.isMessagingEnabled,
+                    hopCount = packet.hopCount,
+                    relayVia = if (packet.hopCount > 0) senderIp else ""
                 )
             }
 
             is WalkiePacket.TextMessage -> {
-                // Ignore if targeted to someone else
+                // Deliver if broadcast or addressed to me
                 if (packet.recipientId == null || packet.recipientId == myDeviceId) {
                     val chatMessage = ChatMessage(
                         id = packet.messageId,
@@ -345,12 +460,13 @@ class NetworkManager(
                         timestamp = packet.timestamp,
                         channelId = packet.channelId,
                         isFromMe = packet.senderId == myDeviceId,
-                        recipientId = packet.recipientId
+                        recipientId = packet.recipientId,
+                        hopCount = packet.hopCount
                     )
                     _incomingMessages.tryEmit(chatMessage)
                 }
 
-                // Also update peer presence
+                // Update peer info
                 updatePeer(
                     id = packet.senderId,
                     callSign = packet.senderCallSign,
@@ -359,7 +475,9 @@ class NetworkManager(
                     isTransmitting = false,
                     userName = packet.senderName,
                     mobileNumber = packet.senderMobile,
-                    isMessagingEnabled = true
+                    isMessagingEnabled = true,
+                    hopCount = packet.hopCount,
+                    relayVia = if (packet.hopCount > 0) senderIp else ""
                 )
             }
         }
@@ -368,8 +486,7 @@ class NetworkManager(
     private fun resetSpeakerTimeout(speakerId: String) {
         activeSpeakerTimeoutJob?.cancel()
         activeSpeakerTimeoutJob = scope.launch(Dispatchers.Default) {
-            // If no audio packet or PTT_END arrives within 750ms, assume transmission finished
-            delay(750)
+            delay(850)
             if (_remoteTransmissionState.value is TransmissionState.Receiving) {
                 _remoteTransmissionState.value = TransmissionState.Idle
                 peerMap[speakerId]?.let {
@@ -388,20 +505,35 @@ class NetworkManager(
         isTransmitting: Boolean,
         userName: String = "",
         mobileNumber: String = "",
-        isMessagingEnabled: Boolean = false
+        isMessagingEnabled: Boolean = false,
+        hopCount: Int = 0,
+        relayVia: String = ""
     ) {
         if (id == myDeviceId) return
         val existing = peerMap[id]
+        val now = System.currentTimeMillis()
+
+        // Keep lowest hop count if seen recently
+        val effectiveHopCount = if (existing != null && (now - existing.lastSeenMs < 8000)) {
+            minOf(existing.hopCount, hopCount)
+        } else {
+            hopCount
+        }
+
         val peer = PeerDevice(
             id = id,
             callSign = callSign,
             ipAddress = ip,
             channel = channel,
             isTransmitting = isTransmitting,
-            lastSeenMs = System.currentTimeMillis(),
+            lastSeenMs = now,
             userName = if (userName.isNotBlank()) userName else existing?.userName ?: "",
             mobileNumber = if (mobileNumber.isNotBlank()) mobileNumber else existing?.mobileNumber ?: "",
-            isMessagingEnabled = isMessagingEnabled || (existing?.isMessagingEnabled == true)
+            isMessagingEnabled = isMessagingEnabled || (existing?.isMessagingEnabled == true),
+            hopCount = effectiveHopCount,
+            relayVia = if (effectiveHopCount > 0) {
+                if (relayVia.isNotBlank()) relayVia else existing?.relayVia ?: ip
+            } else ""
         )
         peerMap[id] = peer
         syncPeersList()
@@ -409,9 +541,11 @@ class NetworkManager(
 
     private fun syncPeersList() {
         val now = System.currentTimeMillis()
-        // Prune peers not heard from in 7 seconds
-        peerMap.entries.removeIf { now - it.value.lastSeenMs > 7000 }
-        _peers.value = peerMap.values.toList().sortedBy { it.callSign }
+        // Prune peers not heard from within 12 seconds
+        peerMap.entries.removeIf { now - it.value.lastSeenMs > 12000 }
+        _peers.value = peerMap.values.toList().sortedWith(
+            compareBy<PeerDevice> { it.hopCount }.thenBy { it.callSign }
+        )
     }
 
     private fun startHeartbeat() {
@@ -433,7 +567,11 @@ class NetworkManager(
             isTransmitting = isTransmittingLocally,
             userName = myUserName,
             mobileNumber = myMobileNumber,
-            isMessagingEnabled = isMessagingEnabled
+            isMessagingEnabled = isMessagingEnabled,
+            timestamp = System.currentTimeMillis(),
+            hopCount = 0,
+            ttl = 6,
+            relayNodeId = ""
         )
         sendPacket(heartbeat)
     }
@@ -448,7 +586,10 @@ class NetworkManager(
             channelId = message.channelId,
             text = message.text,
             timestamp = message.timestamp,
-            recipientId = message.recipientId
+            recipientId = message.recipientId,
+            hopCount = 0,
+            ttl = 6,
+            relayNodeId = ""
         )
         sendPacket(packet)
     }
@@ -459,7 +600,10 @@ class NetworkManager(
             senderId = myDeviceId,
             callSign = myCallSign,
             channelId = currentChannel.id,
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            hopCount = 0,
+            ttl = 6,
+            relayNodeId = ""
         )
         sendPacket(packet)
     }
@@ -469,7 +613,10 @@ class NetworkManager(
             senderId = myDeviceId,
             channelId = currentChannel.id,
             sequenceNumber = sequenceNumber,
-            pcmData = pcmData
+            pcmData = pcmData,
+            hopCount = 0,
+            ttl = 6,
+            relayNodeId = ""
         )
         sendPacket(packet)
     }
@@ -478,74 +625,114 @@ class NetworkManager(
         isTransmittingLocally = false
         val packet = WalkiePacket.PttEnd(
             senderId = myDeviceId,
-            channelId = currentChannel.id
+            channelId = currentChannel.id,
+            hopCount = 0,
+            ttl = 6,
+            relayNodeId = ""
         )
         sendPacket(packet)
     }
 
     private fun sendPacket(packet: WalkiePacket) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                val bytes = WalkiePacket.serialize(packet)
-                val socket = multicastSocket ?: return@launch
+        // Record own packet as seen so returning echo/relays are dropped
+        val packetKey = getPacketUniqueKey(packet)
+        seenMeshPacketKeys[packetKey] = System.currentTimeMillis()
 
-                // 1. Send to Multicast Group IP
-                multicastInetAddress?.let { mcastAddr ->
+        scope.launch(Dispatchers.IO) {
+            dispatchPacket(packet, excludeIp = null)
+        }
+    }
+
+    /**
+     * Reads /proc/net/arp to discover connected clients on Android Mobile Hotspot (AP mode).
+     */
+    private fun getConnectedArpClients(): Set<String> {
+        val clientIps = mutableSetOf<String>()
+        try {
+            val file = File("/proc/net/arp")
+            if (file.exists() && file.canRead()) {
+                file.bufferedReader().useLines { lines ->
+                    lines.drop(1).forEach { line ->
+                        val tokens = line.split("\\s+".toRegex())
+                        if (tokens.isNotEmpty()) {
+                            val ip = tokens[0]
+                            if (ip.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$")) && ip != "0.0.0.0" && ip != "127.0.0.1") {
+                                clientIps.add(ip)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Add standard gateway / host IPs for client nodes connected to a host hotspot
+        if (allLocalIps.any { it.startsWith("192.168.43.") }) {
+            clientIps.add("192.168.43.1")
+        }
+        if (allLocalIps.any { it.startsWith("192.168.49.") }) {
+            clientIps.add("192.168.49.1")
+        }
+        return clientIps
+    }
+
+    /**
+     * Dispatches packet across all interfaces (Wi-Fi + Mobile Hotspot + Tethering),
+     * all subnet broadcasts, known peer unicasts, and hotspot clients.
+     */
+    private fun dispatchPacket(packet: WalkiePacket, excludeIp: String?) {
+        try {
+            val socket = multicastSocket ?: return
+            val bytes = WalkiePacket.serialize(packet)
+
+            // 1. Multicast across each active network interface
+            multicastInetAddress?.let { mcastAddr ->
+                for (intf in allActiveInterfaces) {
                     try {
+                        socket.networkInterface = intf
                         val mcastDatagram = DatagramPacket(bytes, bytes.size, mcastAddr, AudioConstants.DEFAULT_PORT)
                         socket.send(mcastDatagram)
-                    } catch (e: Exception) {
-                        Log.w(tag, "Multicast send error: ${e.message}")
-                    }
-                }
-
-                // 2. Send to Broadcast IP (e.g. 192.168.43.255, 192.168.49.255 or 255.255.255.255)
-                // Ensures transmission succeeds even on routers/hotspots blocking IGMP/Multicast
-                broadcastInetAddress?.let { bcastAddr ->
-                    try {
-                        val bcastDatagram = DatagramPacket(bytes, bytes.size, bcastAddr, AudioConstants.DEFAULT_PORT)
-                        socket.send(bcastDatagram)
-                    } catch (e: Exception) {
-                        Log.w(tag, "Broadcast send error: ${e.message}")
-                    }
-                }
-
-                // 3. Fallback direct unicast to all known peer IP addresses (essential for tethering/AP mode)
-                // In Wi-Fi Direct or Android Local-Only Hotspot, multicast between client & AP is often blocked by the OS kernel.
-                // Unicasting directly to peer IPs guarantees two-way voice and message packet delivery.
-                val peerIps = peerMap.values.mapNotNull {
-                    if (it.ipAddress.isNotBlank() && it.ipAddress != "127.0.0.1" && it.ipAddress != _wifiState.value.ipAddress) {
-                        it.ipAddress
-                    } else null
-                }.distinct()
-
-                for (peerIp in peerIps) {
-                    try {
-                        val peerAddr = InetAddress.getByName(peerIp)
-                        val unicastDatagram = DatagramPacket(bytes, bytes.size, peerAddr, AudioConstants.DEFAULT_PORT)
-                        socket.send(unicastDatagram)
-                    } catch (e: Exception) {
-                        Log.d(tag, "Unicast to $peerIp skipped: ${e.message}")
-                    }
-                }
-
-                // If this device is a client connected to a hotspot host (common default gateway: 192.168.43.1 / 192.168.49.1),
-                // unicast heartbeat/packets to the gateway IP if not yet discovered
-                val localIp = _wifiState.value.ipAddress
-                if (localIp.startsWith("192.168.43.") && localIp != "192.168.43.1") {
-                    try {
-                        val hostAddr = InetAddress.getByName("192.168.43.1")
-                        socket.send(DatagramPacket(bytes, bytes.size, hostAddr, AudioConstants.DEFAULT_PORT))
-                    } catch (_: Exception) {}
-                } else if (localIp.startsWith("192.168.49.") && localIp != "192.168.49.1") {
-                    try {
-                        val hostAddr = InetAddress.getByName("192.168.49.1")
-                        socket.send(DatagramPacket(bytes, bytes.size, hostAddr, AudioConstants.DEFAULT_PORT))
                     } catch (_: Exception) {}
                 }
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to send packet", e)
+                try {
+                    val mcastDatagram = DatagramPacket(bytes, bytes.size, mcastAddr, AudioConstants.DEFAULT_PORT)
+                    socket.send(mcastDatagram)
+                } catch (_: Exception) {}
             }
+
+            // 2. Broadcast to all subnet broadcast addresses (wlan0, ap0, softap, 255.255.255.255)
+            for (bcastAddr in allBroadcastAddresses) {
+                if (excludeIp != null && bcastAddr.hostAddress == excludeIp) continue
+                try {
+                    val bcastDatagram = DatagramPacket(bytes, bytes.size, bcastAddr, AudioConstants.DEFAULT_PORT)
+                    socket.send(bcastDatagram)
+                } catch (_: Exception) {}
+            }
+
+            // 3. Direct unicast fallback to all discovered peers (guarantees penetration through AP isolation)
+            val peerIps = peerMap.values.mapNotNull {
+                if (it.ipAddress.isNotBlank() && it.ipAddress != "127.0.0.1" && it.ipAddress != excludeIp && !allLocalIps.contains(it.ipAddress)) {
+                    it.ipAddress
+                } else null
+            }.distinct()
+
+            for (peerIp in peerIps) {
+                try {
+                    val peerAddr = InetAddress.getByName(peerIp)
+                    val unicastDatagram = DatagramPacket(bytes, bytes.size, peerAddr, AudioConstants.DEFAULT_PORT)
+                    socket.send(unicastDatagram)
+                } catch (_: Exception) {}
+            }
+
+            // 4. Direct unicast to ARP-detected connected clients (mobile hotspot clients)
+            for (clientIp in getConnectedArpClients()) {
+                if (clientIp == excludeIp || allLocalIps.contains(clientIp)) continue
+                try {
+                    val clientAddr = InetAddress.getByName(clientIp)
+                    socket.send(DatagramPacket(bytes, bytes.size, clientAddr, AudioConstants.DEFAULT_PORT))
+                } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to dispatch packet", e)
         }
     }
 

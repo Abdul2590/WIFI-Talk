@@ -60,8 +60,24 @@ class WifiHotspotManager(
     private var periodicScanJob: Job? = null
 
     companion object {
-        const val DEFAULT_WALKIE_PASSWORD = "walkietalkie123"
-        const val WALKIE_SSID_PREFIX = "WALKIE-"
+        const val WALKIE_SSID_PREFIX = "Walkie"
+    }
+
+    private var _currentDynamicSsid: String = generateDynamicOpenSsid()
+    val currentDynamicSsid: String get() = _currentDynamicSsid
+
+    fun generateDynamicOpenSsid(): String {
+        val cleanDevicePart = deviceId.replace(Regex("[^A-Za-z0-9]"), "").takeLast(4).uppercase()
+        val randomSuffix = if (cleanDevicePart.length >= 2) cleanDevicePart else (1000..9999).random().toString()
+        val generated = "Walkie-Open-$randomSuffix"
+        _currentDynamicSsid = generated
+        return generated
+    }
+
+    fun setDynamicSsid(ssid: String) {
+        if (ssid.isNotBlank()) {
+            _currentDynamicSsid = ssid.trim()
+        }
     }
 
     init {
@@ -104,7 +120,8 @@ class WifiHotspotManager(
     }
 
     /**
-     * Creates a 2.4 GHz Wi-Fi SSID / Local-Only Hotspot directly from the application.
+     * Creates a 2.4 GHz Wi-Fi Open SSID / Local-Only Hotspot directly from the application.
+     * User requirement: hosted SSID should have no security (open network with no password).
      */
     fun create24GhzHotspot() {
         if (_hotspotState.value.isHosting || _hotspotState.value.isStarting) {
@@ -122,80 +139,162 @@ class WifiHotspotManager(
             return
         }
 
+        val dynamicSsid = if (_currentDynamicSsid.isBlank()) generateDynamicOpenSsid() else _currentDynamicSsid
+
         _hotspotState.value = _hotspotState.value.copy(
             isStarting = true,
-            statusMessage = "Starting 2.4 GHz Walkie Hotspot..."
+            ssid = dynamicSsid,
+            password = "",
+            isOpenNoPassword = true,
+            statusMessage = "Starting Open 2.4 GHz Hotspot ($dynamicSsid)..."
         )
 
-        try {
-            wifiManager.startLocalOnlyHotspot(
-                object : WifiManager.LocalOnlyHotspotCallback() {
-                    override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
-                        super.onStarted(reservation)
-                        hotspotReservation = reservation
+        val callback = object : WifiManager.LocalOnlyHotspotCallback() {
+            override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+                super.onStarted(reservation)
+                hotspotReservation = reservation
 
-                        val (ssid, pass) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            val config = reservation.softApConfiguration
-                            val s = config?.ssid ?: "$WALKIE_SSID_PREFIX${deviceId.take(4)}"
-                            val p = config?.passphrase ?: DEFAULT_WALKIE_PASSWORD
-                            Pair(s, p)
+                var activeSsid = dynamicSsid
+                var activePassword = ""
+                var isOpenSecurity = true
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val softApConfig = reservation.softApConfiguration
+                    if (softApConfig != null) {
+                        val osSsid = softApConfig.ssid
+                        if (!osSsid.isNullOrEmpty()) {
+                            activeSsid = osSsid
+                        }
+                        val passphrase = softApConfig.passphrase
+                        val secType = softApConfig.securityType
+                        // SECURITY_TYPE_OPEN is 0
+                        if (!passphrase.isNullOrEmpty() && secType != 0) {
+                            activePassword = passphrase
+                            isOpenSecurity = false
                         } else {
-                            @Suppress("DEPRECATION")
-                            val config = reservation.wifiConfiguration
-                            val s = (config?.SSID ?: "$WALKIE_SSID_PREFIX${deviceId.take(4)}").removeSurrounding("\"")
-                            val p = (config?.preSharedKey ?: DEFAULT_WALKIE_PASSWORD).removeSurrounding("\"")
-                            Pair(s, p)
-                        }
-
-                        _hotspotState.value = WifiHotspotState(
-                            isHosting = true,
-                            isStarting = false,
-                            ssid = ssid,
-                            password = pass,
-                            band = "2.4 GHz",
-                            ipAddress = "192.168.43.1",
-                            statusMessage = "Active: Broadcasting 2.4GHz SSID"
-                        )
-                        Log.i(tag, "2.4GHz Hotspot active: $ssid")
-
-                        scope.launch(Dispatchers.IO) {
-                            delay(1000)
-                            onNetworkChanged()
+                            activePassword = ""
+                            isOpenSecurity = true
                         }
                     }
-
-                    override fun onStopped() {
-                        super.onStopped()
-                        Log.i(tag, "Hotspot stopped")
-                        hotspotReservation = null
-                        _hotspotState.value = WifiHotspotState(
-                            isHosting = false,
-                            isStarting = false,
-                            statusMessage = "Hotspot Stopped"
-                        )
-                        onNetworkChanged()
-                    }
-
-                    override fun onFailed(reason: Int) {
-                        super.onFailed(reason)
-                        val reasonStr = when (reason) {
-                            ERROR_NO_CHANNEL -> "No Wi-Fi channel available"
-                            ERROR_GENERIC -> "Generic hotspot error"
-                            ERROR_INCOMPATIBLE_MODE -> "Incompatible mode"
-                            ERROR_TETHERING_DISALLOWED -> "Tethering disallowed"
-                            else -> "Error code $reason"
+                } else {
+                    @Suppress("DEPRECATION")
+                    val wifiConfig = reservation.wifiConfiguration
+                    if (wifiConfig != null) {
+                        val osSsid = wifiConfig.SSID?.replace("\"", "")
+                        if (!osSsid.isNullOrEmpty()) {
+                            activeSsid = osSsid
                         }
-                        Log.w(tag, "Hotspot failed: $reasonStr")
-                        hotspotReservation = null
-                        _hotspotState.value = WifiHotspotState(
-                            isHosting = false,
-                            isStarting = false,
-                            statusMessage = "Failed: $reasonStr"
-                        )
+                        val key = wifiConfig.preSharedKey?.replace("\"", "")
+                        if (!key.isNullOrEmpty()) {
+                            activePassword = key
+                            isOpenSecurity = false
+                        } else {
+                            activePassword = ""
+                            isOpenSecurity = true
+                        }
                     }
-                },
-                Handler(Looper.getMainLooper())
-            )
+                }
+
+                _currentDynamicSsid = activeSsid
+
+                _hotspotState.value = WifiHotspotState(
+                    isHosting = true,
+                    isStarting = false,
+                    ssid = activeSsid,
+                    password = activePassword,
+                    isOpenNoPassword = isOpenSecurity,
+                    band = "2.4 GHz",
+                    ipAddress = "192.168.43.1",
+                    statusMessage = if (isOpenSecurity) {
+                        "Active: Broadcasting Open \"$activeSsid\" (No password)"
+                    } else {
+                        "Active: Broadcasting \"$activeSsid\""
+                    }
+                )
+                Log.i(tag, "2.4GHz Hotspot active: $activeSsid (Open: $isOpenSecurity)")
+
+                scope.launch(Dispatchers.IO) {
+                    delay(1000)
+                    onNetworkChanged()
+                }
+            }
+
+            override fun onStopped() {
+                super.onStopped()
+                Log.i(tag, "Hotspot stopped")
+                hotspotReservation = null
+                _hotspotState.value = WifiHotspotState(
+                    isHosting = false,
+                    isStarting = false,
+                    statusMessage = "Hotspot Stopped"
+                )
+                onNetworkChanged()
+            }
+
+            override fun onFailed(reason: Int) {
+                super.onFailed(reason)
+                val reasonStr = when (reason) {
+                    ERROR_NO_CHANNEL -> "No Wi-Fi channel available"
+                    ERROR_GENERIC -> "Generic hotspot error"
+                    ERROR_INCOMPATIBLE_MODE -> "Incompatible mode"
+                    ERROR_TETHERING_DISALLOWED -> "Tethering disallowed"
+                    else -> "Error code $reason"
+                }
+                Log.w(tag, "Hotspot failed: $reasonStr")
+                hotspotReservation = null
+                _hotspotState.value = WifiHotspotState(
+                    isHosting = false,
+                    isStarting = false,
+                    statusMessage = "Failed: $reasonStr"
+                )
+            }
+        }
+
+        try {
+            var startedWithCustomConfig = false
+            // On Android 11+ (API 30+), attempt to configure OPEN security via reflection
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
+                    val builder = builderClass.getDeclaredConstructor().newInstance()
+
+                    // Try setting dynamic open SSID
+                    try {
+                        val setSsidMethod = builderClass.getMethod("setSsid", String::class.java)
+                        setSsidMethod.invoke(builder, dynamicSsid)
+                    } catch (_: Exception) {}
+
+                    // Set security type OPEN (0) and null passphrase
+                    try {
+                        val setPassphraseMethod = builderClass.getMethod(
+                            "setPassphrase",
+                            String::class.java,
+                            Int::class.javaPrimitiveType
+                        )
+                        setPassphraseMethod.invoke(builder, null, 0 /* SECURITY_TYPE_OPEN */)
+                    } catch (_: Exception) {}
+
+                    val buildMethod = builderClass.getMethod("build")
+                    val config = buildMethod.invoke(builder)
+
+                    val startMethod = wifiManager.javaClass.getMethod(
+                        "startLocalOnlyHotspotWithConfiguration",
+                        Class.forName("android.net.wifi.SoftApConfiguration"),
+                        java.util.concurrent.Executor::class.java,
+                        WifiManager.LocalOnlyHotspotCallback::class.java
+                    )
+                    val executor = ContextCompat.getMainExecutor(context)
+                    startMethod.invoke(wifiManager, config, executor, callback)
+                    startedWithCustomConfig = true
+                    Log.i(tag, "Initiated open hotspot with custom config: $dynamicSsid")
+                } catch (e: Exception) {
+                    Log.d(tag, "startLocalOnlyHotspotWithConfiguration unavailable, fallback to standard: ${e.message}")
+                }
+            }
+
+            if (!startedWithCustomConfig) {
+                wifiManager.startLocalOnlyHotspot(callback, Handler(Looper.getMainLooper()))
+            }
         } catch (e: SecurityException) {
             Log.w(tag, "Missing permission for starting hotspot: ${e.message}")
             _hotspotState.value = WifiHotspotState(
@@ -233,7 +332,7 @@ class WifiHotspotManager(
 
     /**
      * Auto-connects to a discovered Walkie talkie peer hotspot.
-     * Supports both open networks and WPA2 secured local-only hotspots automatically.
+     * Hosted SSIDs have no security (open networks); no password is required.
      */
     fun connectToWalkieNetwork(targetSsid: String, explicitPassword: String? = null) {
         if (_hotspotState.value.isHosting) {
@@ -248,23 +347,20 @@ class WifiHotspotManager(
 
         // Find discovered network to determine if it requires password
         val discovered = _discoveredNetworks.value.firstOrNull { it.ssid == targetSsid }
-        val effectivePassword = when {
-            !explicitPassword.isNullOrEmpty() -> explicitPassword
-            discovered != null && !discovered.isOpen -> DEFAULT_WALKIE_PASSWORD
-            else -> null
-        }
+        val isNetworkOpen = explicitPassword.isNullOrEmpty() && (discovered == null || discovered.isOpen)
 
         _autoWifiState.value = _autoWifiState.value.copy(
             isConnecting = true,
             targetSsid = targetSsid,
-            statusMessage = "Connecting to $targetSsid..."
+            statusMessage = if (isNetworkOpen) "Connecting to Open SSID: $targetSsid (no password)..." else "Connecting to $targetSsid..."
         )
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val builder = WifiNetworkSpecifier.Builder().setSsid(targetSsid)
-                if (!effectivePassword.isNullOrEmpty()) {
-                    builder.setWpa2Passphrase(effectivePassword)
+                // For open networks, do NOT set passphrase, allowing automatic connection without password
+                if (!isNetworkOpen && !explicitPassword.isNullOrEmpty()) {
+                    builder.setWpa2Passphrase(explicitPassword)
                 }
 
                 val specifier = builder.build()
@@ -441,6 +537,7 @@ class WifiHotspotManager(
 
             val sorted = list.sortedWith(
                 compareByDescending<DiscoveredWifiNetwork> { it.isWalkieNetwork }
+                    .thenByDescending { it.isOpen }
                     .thenByDescending { it.is24Ghz }
                     .thenByDescending { it.level }
             ).distinctBy { it.ssid }
@@ -461,11 +558,14 @@ class WifiHotspotManager(
                 _autoWifiState.value.connectedSsid == null &&
                 !_autoWifiState.value.isConnecting
             ) {
+                // Prioritize open walkie networks (no password needed)
                 val candidate = sorted.firstOrNull {
+                    it.isWalkieNetwork && it.ssid != _hotspotState.value.ssid && it.isOpen
+                } ?: sorted.firstOrNull {
                     it.isWalkieNetwork && it.ssid != _hotspotState.value.ssid
                 }
                 if (candidate != null) {
-                    Log.i(tag, "Auto-connecting to discovered walkie peer SSID: ${candidate.ssid}")
+                    Log.i(tag, "Auto-connecting to discovered open walkie peer SSID: ${candidate.ssid}")
                     connectToWalkieNetwork(candidate.ssid)
                 }
             }

@@ -254,10 +254,25 @@ fun PeersDialog(
                                                         Text("CHAT", color = SignalGreen, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                                     }
                                                 }
+                                                if (peer.hopCount > 0) {
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(RadioCyan.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    ) {
+                                                        Text("${peer.hopCount} HOP${if (peer.hopCount > 1) "S" else ""}", color = RadioCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
                                             }
                                             Text(
                                                 text = buildString {
                                                     if (peer.mobileNumber.isNotBlank()) append("${peer.mobileNumber} • ")
+                                                    if (peer.hopCount > 0) {
+                                                        append("CHAIN (${peer.hopCount}h) • ")
+                                                    } else {
+                                                        append("DIRECT • ")
+                                                    }
                                                     append("${peer.ipAddress} • CH-${peer.channel}")
                                                 },
                                                 color = if (isSameChannel) TacticalAmber else TextMuted,

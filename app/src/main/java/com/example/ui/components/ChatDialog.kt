@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -266,7 +267,7 @@ fun ChatDialog(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 contentPadding = PaddingValues(4.dp)
                             ) {
-                                items(filteredMessages, key = { it.id }) { msg ->
+                                itemsIndexed(filteredMessages, key = { index, msg -> "${msg.id}_${msg.timestamp}_$index" }) { _, msg ->
                                     ChatMessageBubble(msg = msg)
                                 }
                             }
@@ -539,6 +540,16 @@ fun ChatMessageBubble(msg: ChatMessage) {
                 fontSize = 9.sp,
                 fontFamily = FontFamily.Monospace
             )
+            if (msg.hopCount > 0) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "• Chain (${msg.hopCount}h)",
+                    color = RadioCyan,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
 
         // Message Bubble
